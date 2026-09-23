@@ -9,6 +9,7 @@
 #include <ctype.h>
 #include <signal.h>
 
+//ola amig
 
 #define MAX_CMD 11
 #define MAX_UID 7
