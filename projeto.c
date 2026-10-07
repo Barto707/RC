@@ -8,14 +8,15 @@
 #include <netdb.h>
 #include <ctype.h>
 #include <signal.h>
-
-//ola amig
+#include <sys/stat.h>
 
 #define MAX_CMD 11
 #define MAX_UID 7
 #define MAX_PASSWORD 9
 #define MAX_BUFFER 64
 #define MAX_IP 30
+#define MAX_FILENAME 24
+#define MAX_LABEL 20
 #define DSIP "193.136.138.142"
 #define DSPORT "59000"
 
@@ -71,6 +72,7 @@ int verify_uid(const char *UID) {
     }
     return 1;
 }
+
 int verify_password(const char *password) {
     if (strlen(password) != 8) {
         printf("invalid password\n");
@@ -79,6 +81,54 @@ int verify_password(const char *password) {
     for (int i = 0; i < 8; i++) {
         if (!isalnum(password[i])) {
             printf("invalid password\n");
+            return 0;
+        }
+    }
+    return 1;
+}
+
+int verify_filename(const char *filename){
+    if(strlen(filename) >= 24){
+        printf("invalid filename\n");
+        return 0;
+    }
+
+    const char *dot = strrchr(filename, '.');
+    if(dot == NULL || dot == filename){
+        printf("invalid filename\n");
+            return 0;
+    }
+
+    for(const char *p = filename; p < dot; p++){
+        if(!isalnum(*p) && *p != '-' && *p != '_'){
+            printf("invalid filename\n");
+            return 0;
+        }
+    }
+
+    if(strlen(dot + 1) != 3){
+        printf("invalid filename\n");
+        return 0;
+    }
+
+    for(int i = 1; i <= 3; i++){
+        if(!isalnum(dot[i])){
+            printf("invalid filename\n");
+            return 0;
+        }
+    }
+    return 1;
+}
+
+int verify_label(const char *label){
+    if(strlen(label) > 20 || strlen(label) < 1){
+        printf("invalid label\n");
+        return 0;
+    }
+
+    for(const char *l = label; *l != '\0'; l++){
+        if(!isalnum(*l) && *l != '-' && *l != '_'){
+            printf("invalid label\n");
             return 0;
         }
     }
@@ -184,6 +234,76 @@ int handle_unregister(connection conn, struct addrinfo *res, user logged_user, i
     return 0; 
 }
 
+int publish_resource(connection conn, struct addrinfo *res, user logged_user, int peerport, const char *filename, const char *label){
+    char buffer[MAX_BUFFER];
+    ssize_t n;
+    struct stat file_stat;
+
+    if (!verify_filename(filename) || !verify_label(label)) return 1;
+
+    if(stat(filename, &file_stat) == -1){
+        printf("file does not exist in the local directory\n");
+        return 0;
+    }
+
+    long f_size = file_stat.st_size;
+    snprintf(buffer, sizeof(buffer), "PUB %s %s %s %ld %s\n", get_id(&logged_user), get_password(&logged_user), filename, f_size, label);
+    if (sendto(conn.fd, buffer, strlen(buffer), 0, res->ai_addr, res->ai_addrlen) == -1) exit(1);
+
+    conn.addrlen = sizeof(conn.addr);
+    n = recvfrom(conn.fd, buffer, sizeof(buffer) - 1, 0, (struct sockaddr *)&conn.addr, &conn.addrlen);
+    if(n == -1) exit(1);
+    buffer[n] = '\0';
+
+    char response[4];
+    sscanf(buffer, "%*s %s", response);
+
+    if(strcmp(response, "OK") == 0){
+        printf("successful publication\n");
+    } else if(strcmp(response, "NLG") == 0){
+        printf("user not logged in\n");
+    } else if(strcmp(response, "UNR") == 0){
+        printf("unknown user\n");
+    } else if(strcmp(response, "WRP") == 0){
+        printf("wrong password\n");
+    } else if(strcmp(response, "NOK") == 0){                                //basta colocar wrong password?
+        printf("unsuccessful publish\n");
+    }
+    return 0; 
+}
+
+int remove_resource(connection conn, struct addrinfo *res, user logged_user, int peerport, const char *filename){
+    char buffer[MAX_BUFFER];
+    ssize_t n;
+    struct stat file_stat;
+
+    if (!verify_filename(filename)) return 1;
+
+    snprintf(buffer, sizeof(buffer), "REM %s %s %s\n", get_id(&logged_user), get_password(&logged_user), filename);
+    if (sendto(conn.fd, buffer, strlen(buffer), 0, res->ai_addr, res->ai_addrlen) == -1) exit(1);
+
+    conn.addrlen = sizeof(conn.addr);
+    n = recvfrom(conn.fd, buffer, sizeof(buffer) - 1, 0, (struct sockaddr *)&conn.addr, &conn.addrlen);
+    if(n == -1) exit(1);
+    buffer[n] = '\0';
+
+    char response[4];
+    sscanf(buffer, "%*s %s", response);
+
+    if(strcmp(response, "OK") == 0){
+        printf("successful removal\n");
+    } else if(strcmp(response, "NLG") == 0){
+        printf("user not logged in\n");
+    } else if(strcmp(response, "UNR") == 0){
+        printf("unknown user\n");
+    } else if(strcmp(response, "WRP") == 0){
+        printf("wrong password\n");
+    } else if(strcmp(response, "NOK") == 0){                                
+        printf("resource not found\n");                      //no enunciado diz que essa é a mensagem mas devia ser tipo "nao foi publicado por este user" de acordo com outra parte do enunciado
+    }
+    return 0; 
+}
+
 void read_command(connection conn, struct addrinfo *res, int peerport){
     char command[MAX_CMD];
     user temp_user;
@@ -192,6 +312,8 @@ void read_command(connection conn, struct addrinfo *res, int peerport){
     char buffer[MAX_BUFFER];
     int args;
     int is_logged_in = 0;
+    char filename[MAX_FILENAME];
+    char label[MAX_LABEL];
 
     while(keep_running){
         if (fgets(buffer, sizeof(buffer), stdin) == NULL) {
@@ -199,9 +321,10 @@ void read_command(connection conn, struct addrinfo *res, int peerport){
             break;
         }
 
-        args = sscanf(buffer, "%s %s %s %s", command, get_id(&temp_user), get_password(&temp_user), extra);
-        if (args >= 1) {
-            if (args == 3 && strcmp(command, "login") == 0){
+        //args = sscanf(buffer, "%s %s %s %s", command, get_id(&temp_user), get_password(&temp_user), extra);
+        args = sscanf(buffer, "%s", command);
+        if (args == 1) {
+            if (strcmp(command, "login") == 0 && sscanf(buffer, "%s %s %s %s", command, get_id(&temp_user), get_password(&temp_user), extra) == 3){
                 if(is_logged_in) {
                     printf("already logged in\n");
                     continue;
@@ -210,23 +333,33 @@ void read_command(connection conn, struct addrinfo *res, int peerport){
                     set_id(&logged_user, get_id(&temp_user));
                     set_password(&logged_user, get_password(&temp_user));
                 }
-            } else if (args == 1 && strcmp(command, "exit") == 0){
+            } else if (strcmp(command, "exit") == 0){
                 if(is_logged_in){
                     printf("need to logout first\n");
                     continue;
                 } break;
-            } else if (args == 1 && strcmp(command, "logout") == 0){
+            } else if (strcmp(command, "logout") == 0){
                 if (!is_logged_in) {
                     printf("user not logged in\n");
                     continue;
                 } handle_logout(conn, res, logged_user, peerport, &is_logged_in);
-            } else if (args == 1 && strcmp(command, "unregister") == 0){
+            } else if (strcmp(command, "unregister") == 0){
                 if (!is_logged_in) {
                     printf("user not logged in/registered\n");
                     continue;
                 } handle_unregister(conn, res, logged_user, peerport, &is_logged_in);
+            } else if (strcmp(command, "publish") == 0 && sscanf(buffer, "%s %s %s %s", command, filename, label, extra) == 3){
+                if (!is_logged_in) {
+                    printf("user not logged in\n");
+                    continue;
+                } publish_resource(conn, res, logged_user, peerport, filename, label);
+            } else if (strcmp(command, "remove") == 0 && sscanf(buffer, "%s %s %s", command, filename, extra) == 2){
+                if (!is_logged_in) {
+                    printf("user not logged in\n");
+                    continue;
+                } remove_resource(conn, res, logged_user, peerport, filename);
             } else {
-            printf("Invalid command or arguments\n");
+                printf("Invalid command or arguments\n");
             }
         }
     }
