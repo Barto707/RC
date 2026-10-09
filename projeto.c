@@ -14,9 +14,11 @@
 #define MAX_UID 7
 #define MAX_PASSWORD 9
 #define MAX_BUFFER 128
+#define LIST_BUFFER 2048
 #define MAX_IP 30
 #define MAX_FILENAME 24
 #define MAX_LABEL 20
+#define MAX_TIME 16
 #define DSIP "193.136.138.142"
 #define DSPORT "59000"
 
@@ -32,6 +34,14 @@ typedef struct {
     char uid[MAX_UID];
     char password[MAX_PASSWORD];
 } user;
+
+typedef struct {
+    char uid[16];
+    long fsize;
+    char label[MAX_LABEL];
+    char pub_time[MAX_TIME];
+    char availability[4];
+} PeerInfo;
 
 char* get_id(user *x) {
     return x->uid;
@@ -290,7 +300,7 @@ int publish_resource(connection conn, struct addrinfo *res, user logged_user, in
         printf("unknown user\n");
     } else if(strcmp(response, "WRP") == 0){
         printf("wrong password\n");
-    } else if(strcmp(response, "NOK") == 0){                                //basta colocar wrong password?
+    } else if(strcmp(response, "NOK") == 0){               //basta colocar wrong password? nao sei
         printf("unsuccessful publish\n");
     }
     return 0; 
@@ -328,10 +338,61 @@ int remove_resource(connection conn, struct addrinfo *res, user logged_user, int
     return 0; 
 }
 
+int list_files(connection conn, struct addrinfo *res, user logged_user, int peerport){
+    char buffer[LIST_BUFFER];
+    ssize_t n;
+
+    snprintf(buffer, sizeof(buffer), "LST\n");
+
+    if (sendto(conn.fd, buffer, strlen(buffer), 0, res->ai_addr, res->ai_addrlen) == -1) exit(1);
+
+    conn.addrlen = sizeof(conn.addr);
+    n = recvfrom(conn.fd, buffer, sizeof(buffer) - 1, 0, (struct sockaddr *)&conn.addr, &conn.addrlen);
+    if(n == -1) exit(1);
+    buffer[n] = '\0';
+
+    char response[4];
+    sscanf(buffer, "%*s %s", response);
+    if (strcmp(response, "NOK") == 0) {
+        printf("no published resources\n");
+    }
+    else if (strcmp(response, "OK") == 0) {
+        char *ptr = buffer + 6;
+        char filename[MAX_FILENAME];
+        int count = 0;
+        printf("List of published resources:\n");
+        
+        int bytes_read;
+        while (sscanf(ptr, "%s %n", filename, &bytes_read) == 1) {
+            count++;
+            printf("%d %s\n", count, filename);
+            ptr += bytes_read;
+        }
+
+        printf("-----------------------------\n");
+    }
+
+    return 0;
+}
+
+void print_friendly_timestamp(const char *ts_str) {
+    int year, month, day, hour, min, sec;
+
+    sscanf(ts_str, "%4d%2d%2d-%2d%2d%2d", &year, &month, &day, &hour, &min, &sec);
+
+    // Option 1: Standard International Format (2026-10-05 19:10:30)
+    printf("Formatted (ISO):  %04d-%02d-%02d %02d:%02d:%02d\n", 
+           year, month, day, hour, min, sec);
+
+    // Option 2: Written European/US Style (05/10/2026 at 19:10)
+    printf("Formatted (User): %02d/%02d/%04d at %02d:%02d\n", 
+           day, month, year, hour, min);
+}
+
 int handle_versions(int tcp_fd, user logged_user, const char *filename){
     char buffer[MAX_BUFFER];
     char message[MAX_BUFFER];        
-    int bytes_read;
+    int bytes_read = 0;
     char c;
     int n;
 
@@ -342,11 +403,11 @@ int handle_versions(int tcp_fd, user logged_user, const char *filename){
 
     snprintf(message, sizeof(buffer), "VRS %s\n", filename);
     write(tcp_fd, message, strlen(message));
+
     while(bytes_read < MAX_BUFFER -1){
         n = read(tcp_fd, &c, 1);
 
         if (n == -1) return 1;
-
         if (n == 0) break;
 
         buffer[bytes_read++] = c;
@@ -362,12 +423,33 @@ int handle_versions(int tcp_fd, user logged_user, const char *filename){
     char response[4];
     sscanf(buffer, "%*s %s %n", response, &chars_read);
     offset += chars_read;
+    char *ptr = buffer + offset;
+
     if(strcmp(response, "OK") == 0){
         printf("List of peers available:\n");
-        //fazer a lista
-        //qual o tamanho maximo da mensagem? vai ser preciso alocar memória?
+        PeerInfo peer;
+        int count = 0;
+        while(sscanf(ptr, "%s %ld %s %s %s%n", peer.uid, &peer.fsize, peer.label, peer.pub_time, peer.availability, &chars_read) == 5){
+            count++;
+            printf("%d-----------------------------\n", count);
+            printf("Peer UID: %s\n", peer.uid);
+            printf("File Size: %ld bytes\n", peer.fsize);
+            printf("Label: %s\n", peer.label);
+            int year, month, day, hour, min, sec;
+            sscanf(peer.pub_time, "%4d%2d%2d-%2d%2d%2d", &year, &month, &day, &hour, &min, &sec);
+            printf("Publication Time: %04d-%02d-%02d %02d:%02d:%02d\n", year, month, day, hour, min, sec);
+            if (strcmp(peer.availability, "AVL") == 0) {
+                printf("Availability: Available\n");
+            } else {
+                printf("Availability: Not Available\n");
+            }
+            ptr += chars_read;
+        }
+        printf("-----------------------------\n");
     } else if (strcmp(response, "NOK") == 0){
-        printf("No peer available for such resource\n"); //que mensagem escrever? tem de ser user friendly
+        printf("no peer available for such resource\n"); 
+    } else if(strcmp(response, "ERR") == 0){
+        printf("error");
     }
     return 0;  //é necessário por o caso para erro?(nesta função e nas outras todas lol)
 }
@@ -427,12 +509,9 @@ void read_command(connection conn, struct addrinfo *res, int peerport, const cha
                     printf("user not logged in\n");
                     continue;
                 } remove_resource(conn, res, logged_user, peerport, filename);
+            } else if (strcmp(command, "list") == 0) {
+                list_files(conn, res, logged_user, peerport);
             } else if (strcmp(command, "versions") == 0 && sscanf(buffer, "%s %s %s", command, filename, extra) == 2) {
-                //not sure se precisa de tar logged in
-                if (!is_logged_in) {
-                    printf("user not logged in\n");
-                    continue;
-                } 
                 tcp_fd = server_connect_TCP(ip, port);
                 handle_versions(tcp_fd, logged_user, filename);
             } else {
