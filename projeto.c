@@ -13,7 +13,7 @@
 #define MAX_CMD 11
 #define MAX_UID 7
 #define MAX_PASSWORD 9
-#define MAX_BUFFER 64
+#define MAX_BUFFER 128
 #define MAX_IP 30
 #define MAX_FILENAME 24
 #define MAX_LABEL 20
@@ -135,7 +135,7 @@ int verify_label(const char *label){
     return 1;
 }
 
-void server_connect (connection *conn, struct addrinfo **res, const char *ip, const char *port) {
+void server_connect_UDP(connection *conn, struct addrinfo **res, const char *ip, const char *port) {
     struct addrinfo hints;
 
     conn->fd = socket(AF_INET, SOCK_DGRAM, 0);
@@ -146,6 +146,30 @@ void server_connect (connection *conn, struct addrinfo **res, const char *ip, co
     hints.ai_socktype = SOCK_DGRAM;
 
     if (getaddrinfo(ip, port, &hints, res) != 0) exit(1);
+}
+
+int server_connect_TCP(const char *ip, const char *port){
+    int fd, errcode;
+    struct addrinfo hints, *res;
+    ssize_t n;
+
+    fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd == -1) exit(1);
+
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+
+    errcode = getaddrinfo(ip, port, &hints, &res);
+    if(errcode != 0) exit(1);
+
+    n = connect(fd, res->ai_addr, res->ai_addrlen);
+    if(n == -1) {
+        freeaddrinfo(res);
+        exit(1);
+    }
+    freeaddrinfo(res);
+    return fd;
 }
 
 int handle_login(connection conn, struct addrinfo *res, user temp_user, int peerport, int *is_logged_in) {
@@ -304,7 +328,51 @@ int remove_resource(connection conn, struct addrinfo *res, user logged_user, int
     return 0; 
 }
 
-void read_command(connection conn, struct addrinfo *res, int peerport){
+int handle_versions(int tcp_fd, user logged_user, const char *filename){
+    char buffer[MAX_BUFFER];
+    char message[MAX_BUFFER];        
+    int bytes_read;
+    char c;
+    int n;
+
+    if(!verify_filename(filename)){
+        close(tcp_fd);
+        return 1;
+    }
+
+    snprintf(message, sizeof(buffer), "VRS %s\n", filename);
+    write(tcp_fd, message, strlen(message));
+    while(bytes_read < MAX_BUFFER -1){
+        n = read(tcp_fd, &c, 1);
+
+        if (n == -1) return 1;
+
+        if (n == 0) break;
+
+        buffer[bytes_read++] = c;
+        if ( c == '\n'){
+            break;
+        }
+    }
+
+    buffer[bytes_read] = '\0';
+    int chars_read = 0;
+    int offset = 0;
+
+    char response[4];
+    sscanf(buffer, "%*s %s %n", response, &chars_read);
+    offset += chars_read;
+    if(strcmp(response, "OK") == 0){
+        printf("List of peers available:\n");
+        //fazer a lista
+        //qual o tamanho maximo da mensagem? vai ser preciso alocar memória?
+    } else if (strcmp(response, "NOK") == 0){
+        printf("No peer available for such resource\n"); //que mensagem escrever? tem de ser user friendly
+    }
+    return 0;  //é necessário por o caso para erro?(nesta função e nas outras todas lol)
+}
+
+void read_command(connection conn, struct addrinfo *res, int peerport, const char *ip, const char *port){
     char command[MAX_CMD];
     user temp_user;
     user logged_user;
@@ -314,6 +382,7 @@ void read_command(connection conn, struct addrinfo *res, int peerport){
     int is_logged_in = 0;
     char filename[MAX_FILENAME];
     char label[MAX_LABEL];
+    int tcp_fd;
 
     while(keep_running){
         if (fgets(buffer, sizeof(buffer), stdin) == NULL) {
@@ -358,6 +427,14 @@ void read_command(connection conn, struct addrinfo *res, int peerport){
                     printf("user not logged in\n");
                     continue;
                 } remove_resource(conn, res, logged_user, peerport, filename);
+            } else if (strcmp(command, "versions") == 0 && sscanf(buffer, "%s %s %s", command, filename, extra) == 2) {
+                //not sure se precisa de tar logged in
+                if (!is_logged_in) {
+                    printf("user not logged in\n");
+                    continue;
+                } 
+                tcp_fd = server_connect_TCP(ip, port);
+                handle_versions(tcp_fd, logged_user, filename);
             } else {
                 printf("Invalid command or arguments\n");
             }
@@ -417,9 +494,9 @@ int main(int argc, char *argv[]){
     connection conn;
     struct addrinfo *res;
 
-    server_connect(&conn, &res, ip, port);
-    
-    read_command(conn, res, peerport);
+    server_connect_UDP(&conn, &res, ip, port);
+
+    read_command(conn, res, peerport, ip, port);
     
     freeaddrinfo(res);
     close(conn.fd);
