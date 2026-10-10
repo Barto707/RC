@@ -5,7 +5,9 @@
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <netdb.h>
+#include <errno.h>
 #include <ctype.h>
 #include <signal.h>
 #include <sys/stat.h>
@@ -147,6 +149,9 @@ int verify_label(const char *label){
 
 void server_connect_UDP(connection *conn, struct addrinfo **res, const char *ip, const char *port) {
     struct addrinfo hints;
+    struct timeval tv;
+    tv.tv_sec = 5;
+    tv.tv_usec = 0; 
 
     conn->fd = socket(AF_INET, SOCK_DGRAM, 0);
     if (conn->fd ==-1) exit(1);
@@ -156,6 +161,10 @@ void server_connect_UDP(connection *conn, struct addrinfo **res, const char *ip,
     hints.ai_socktype = SOCK_DGRAM;
 
     if (getaddrinfo(ip, port, &hints, res) != 0) exit(1);
+
+    if (setsockopt(conn->fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0) {
+        perror("setsockopt failed");
+    }
 }
 
 int server_connect_TCP(const char *ip, const char *port){
@@ -193,7 +202,15 @@ int handle_login(connection conn, struct addrinfo *res, user temp_user, int peer
 
     conn.addrlen = sizeof(conn.addr);
     n = recvfrom(conn.fd, buffer, sizeof(buffer) - 1, 0, (struct sockaddr *)&conn.addr, &conn.addrlen);
-    if (n == -1) exit(1);
+    if (n == -1) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            printf("didn't receive a server response. try again\n");
+            return 1;
+        } else {
+            exit(1);
+        }
+    }
+
     buffer[n] = '\0';
 
     char response[4];
@@ -221,7 +238,14 @@ int handle_logout(connection conn, struct addrinfo *res, user logged_user, int p
 
     conn.addrlen = sizeof(conn.addr);
     n = recvfrom(conn.fd, buffer, sizeof(buffer) - 1, 0, (struct sockaddr *)&conn.addr, &conn.addrlen);
-    if(n == -1) exit(1);
+    if (n == -1) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            printf("timeout waiting for server response\n");
+            return 1;
+        } else {
+            exit(1);
+        }
+    }
     buffer[n] = '\0';
 
     char response[4];
@@ -249,7 +273,14 @@ int handle_unregister(connection conn, struct addrinfo *res, user logged_user, i
 
     conn.addrlen = sizeof(conn.addr);
     n = recvfrom(conn.fd, buffer, sizeof(buffer) - 1, 0, (struct sockaddr *)&conn.addr, &conn.addrlen);
-    if(n == -1) exit(1);
+    if(n == -1) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            printf("timeout waiting for server response\n");
+            return 1;
+        } else {
+            exit(1);
+        }
+    }
     buffer[n] = '\0';
 
     char response[4];
@@ -286,7 +317,14 @@ int publish_resource(connection conn, struct addrinfo *res, user logged_user, in
 
     conn.addrlen = sizeof(conn.addr);
     n = recvfrom(conn.fd, buffer, sizeof(buffer) - 1, 0, (struct sockaddr *)&conn.addr, &conn.addrlen);
-    if(n == -1) exit(1);
+    if(n == -1) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            printf("timeout waiting for server response\n");
+            return 1;
+        } else {
+            exit(1);
+        }
+    }
     buffer[n] = '\0';
 
     char response[4];
@@ -318,7 +356,14 @@ int remove_resource(connection conn, struct addrinfo *res, user logged_user, int
 
     conn.addrlen = sizeof(conn.addr);
     n = recvfrom(conn.fd, buffer, sizeof(buffer) - 1, 0, (struct sockaddr *)&conn.addr, &conn.addrlen);
-    if(n == -1) exit(1);
+    if(n == -1) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            printf("timeout waiting for server response\n");
+            return 1;
+        } else {
+            exit(1);
+        }
+    }
     buffer[n] = '\0';
 
     char response[4];
@@ -348,7 +393,14 @@ int list_files(connection conn, struct addrinfo *res, user logged_user, int peer
 
     conn.addrlen = sizeof(conn.addr);
     n = recvfrom(conn.fd, buffer, sizeof(buffer) - 1, 0, (struct sockaddr *)&conn.addr, &conn.addrlen);
-    if(n == -1) exit(1);
+    if(n == -1) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            printf("timeout waiting for server response\n");
+            return 1;
+        } else {
+            exit(1);
+        }
+    }
     buffer[n] = '\0';
 
     char response[4];
@@ -373,20 +425,6 @@ int list_files(connection conn, struct addrinfo *res, user logged_user, int peer
     }
 
     return 0;
-}
-
-void print_friendly_timestamp(const char *ts_str) {
-    int year, month, day, hour, min, sec;
-
-    sscanf(ts_str, "%4d%2d%2d-%2d%2d%2d", &year, &month, &day, &hour, &min, &sec);
-
-    // Option 1: Standard International Format (2026-10-05 19:10:30)
-    printf("Formatted (ISO):  %04d-%02d-%02d %02d:%02d:%02d\n", 
-           year, month, day, hour, min, sec);
-
-    // Option 2: Written European/US Style (05/10/2026 at 19:10)
-    printf("Formatted (User): %02d/%02d/%04d at %02d:%02d\n", 
-           day, month, year, hour, min);
 }
 
 int handle_versions(int tcp_fd, user logged_user, const char *filename){
@@ -431,7 +469,7 @@ int handle_versions(int tcp_fd, user logged_user, const char *filename){
         int count = 0;
         while(sscanf(ptr, "%s %ld %s %s %s%n", peer.uid, &peer.fsize, peer.label, peer.pub_time, peer.availability, &chars_read) == 5){
             count++;
-            printf("%d-----------------------------\n", count);
+            printf("%d.-----------------------------\n", count);
             printf("Peer UID: %s\n", peer.uid);
             printf("File Size: %ld bytes\n", peer.fsize);
             printf("Label: %s\n", peer.label);
@@ -451,7 +489,7 @@ int handle_versions(int tcp_fd, user logged_user, const char *filename){
     } else if(strcmp(response, "ERR") == 0){
         printf("error");
     }
-    return 0;  //é necessário por o caso para erro?(nesta função e nas outras todas lol)
+    return 0; 
 }
 
 void read_command(connection conn, struct addrinfo *res, int peerport, const char *ip, const char *port){
